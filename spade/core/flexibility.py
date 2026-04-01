@@ -143,6 +143,8 @@ def build_flexibility_graph(
         if not in_neighbourhood[i]:
             continue
         for pj, j in enumerate(pocket_residues):
+            if pi == pj:
+                continue  # skip self — diagonal stays zero
             if not in_neighbourhood[j]:
                 continue
             pae_val = pae_matrix[i, j]
