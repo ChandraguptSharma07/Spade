@@ -63,6 +63,19 @@ Repository = "https://github.com/ChandraguptSharma07/Spade"
 [tool.hatch.build.targets.wheel]
 packages = ["spade"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"spade/data/dunbrack_rotamers.pkl" = "spade/data/dunbrack_rotamers.pkl"
+"spade/templates/report.html.j2"  = "spade/templates/report.html.j2"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "spade/",
+    "tests/",
+    "scripts/",
+    "pyproject.toml",
+    "README.md",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
