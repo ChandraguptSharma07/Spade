@@ -23,7 +23,7 @@ except ImportError as e:
 
 
 EBI_BASE = "https://alphafold.ebi.ac.uk/files"
-_MODEL_VERSIONS = ["v4", "v3", "v2", "v1"]
+_MODEL_VERSIONS = ["v6", "v5", "v4", "v3", "v2", "v1"]
 
 
 class StructureParseError(Exception):

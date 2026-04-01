@@ -1,4 +1,5 @@
-docs/ # under development
+# under development
+docs/
 
 # Python
 __pycache__/
