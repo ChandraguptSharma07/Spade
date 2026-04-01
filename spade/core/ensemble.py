@@ -101,21 +101,25 @@ class EnsembleGenerator:
                         stacklevel=2,
                     )
 
-            conformer._rmsd_from_ref = rmsd
+            # Store RMSD as per-atom data (ProDy AtomGroup has no __dict__)
+            conformer.setData("rmsd_from_ref", np.full(conformer.numAtoms(), rmsd))
             candidates.append(conformer)
 
         if not candidates:
             # Fallback: return a copy of the reference structure as the single conformer
             ref_copy = self.structure.atoms.copy()
-            ref_copy._rmsd_from_ref = 0.0
+            ref_copy.setData("rmsd_from_ref", np.zeros(ref_copy.numAtoms()))
             candidates = [ref_copy]
 
         selected = self._select_diverse(candidates)
 
-        # Tag with provenance
+        # Tag with provenance via setData (AtomGroup is a Cython class — no __dict__)
         for i, conf in enumerate(selected):
-            conf.conformer_index = i
-            conf.ca_rmsd_from_ref = getattr(conf, "_rmsd_from_ref", 0.0)
+            n = conf.numAtoms()
+            conf.setData("conformer_index", np.full(n, i, dtype=int))
+            rmsd_data = conf.getData("rmsd_from_ref")
+            rmsd_val = float(rmsd_data[0]) if rmsd_data is not None else 0.0
+            conf.setData("ca_rmsd_from_ref", np.full(n, rmsd_val))
 
         return selected[: self.n_conformers]
 
