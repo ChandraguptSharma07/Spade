@@ -218,8 +218,12 @@ def _try_prolif(
                     arr = np.zeros(128, dtype=np.float32)
                 fps.append(arr)
             finally:
-                os.unlink(rec_path)
-                os.unlink(lig_path)
+                # MDAnalysis may hold file handles open on Windows; best-effort cleanup
+                for _p in (rec_path, lig_path):
+                    try:
+                        os.unlink(_p)
+                    except OSError:
+                        pass
 
         return fps, True
 
