@@ -1,0 +1,28 @@
+REMARK   1 STRUCTURE OF EGFR KINASE DOMAIN (FIXTURE - TRUNCATED FOR TESTING)
+REMARK   1 P00533 AF-P00533-F1-model_v4
+ATOM      1  N   LEU A 696       5.000   5.000   5.000  1.00 92.50           N
+ATOM      2  CA  LEU A 696       6.000   5.000   5.000  1.00 92.50           C
+ATOM      3  C   LEU A 696       6.500   6.400   5.000  1.00 92.50           C
+ATOM      4  O   LEU A 696       7.700   6.500   5.000  1.00 92.50           O
+ATOM      5  CB  LEU A 696       6.700   4.100   6.100  1.00 92.50           C
+ATOM      6  CG  LEU A 696       7.300   2.800   5.700  1.00 92.50           C
+ATOM      7  CD1 LEU A 696       8.800   2.900   5.600  1.00 92.50           C
+ATOM      8  CD2 LEU A 696       6.700   1.700   6.600  1.00 92.50           C
+ATOM      9  N   VAL A 697       5.600   7.400   5.000  1.00 88.30           N
+ATOM     10  CA  VAL A 697       5.900   8.800   5.000  1.00 88.30           C
+ATOM     11  C   VAL A 697       7.400   9.100   5.000  1.00 88.30           C
+ATOM     12  O   VAL A 697       8.000  10.200   5.000  1.00 88.30           O
+ATOM     13  CB  VAL A 697       5.200   9.500   6.100  1.00 88.30           C
+ATOM     14  CG1 VAL A 697       5.600  11.000   6.100  1.00 88.30           C
+ATOM     15  CG2 VAL A 697       3.700   9.300   6.000  1.00 88.30           C
+ATOM     16  N   SER A 698       8.100   8.000   5.000  1.00 65.10           N
+ATOM     17  CA  SER A 698       9.600   8.100   5.000  1.00 65.10           C
+ATOM     18  C   SER A 698      10.200   9.500   5.000  1.00 65.10           C
+ATOM     19  O   SER A 698      11.400   9.700   5.000  1.00 65.10           O
+ATOM     20  CB  SER A 698      10.200   7.200   6.100  1.00 65.10           C
+ATOM     21  OG  SER A 698      11.600   7.400   6.200  1.00 65.10           O
+ATOM     22  N   GLY A 699      9.400  10.500   5.000  1.00 42.80           N
+ATOM     23  CA  GLY A 699       9.900  11.900   5.000  1.00 42.80           C
+ATOM     24  C   GLY A 699      11.400  12.000   5.000  1.00 42.80           C
+ATOM     25  O   GLY A 699      12.000  13.100   5.000  1.00 42.80           O
+END
