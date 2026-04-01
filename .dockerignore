@@ -1,0 +1,34 @@
+# Git
+.git/
+.gitignore
+
+# Docs (internal, not needed in image)
+docs/
+
+# Dev artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+*.egg-info/
+
+# Notebooks (large, not needed for CLI image)
+notebooks/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI secrets / local config
+.env
+*.env
