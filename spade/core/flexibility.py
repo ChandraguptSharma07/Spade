@@ -9,14 +9,9 @@ uncertainty, not biological breathing motions near the binding site.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
-
-try:
-    import prody
-except ImportError as e:
-    raise ImportError("ProDy is required: conda install -c conda-forge prody") from e
 
 # ---------------------------------------------------------------------------
 # pLDDT tier thresholds (inclusive lower, exclusive upper except top)
@@ -138,6 +133,9 @@ def build_flexibility_graph(
             inter_domain_warning = True
 
     # Build pocket-local graph: N_pocket × N_pocket
+    # IMPORTANT: only residues confirmed to be in the pocket neighbourhood
+    # contribute. Any residue outside the 12 Å zone gets zero weight in the
+    # adjacency matrix regardless of how low its PAE value is.
     n_pocket = len(pocket_residues)
     graph = np.zeros((n_pocket, n_pocket), dtype=np.float32)
 
