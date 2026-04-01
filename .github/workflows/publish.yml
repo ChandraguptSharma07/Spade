@@ -1,0 +1,75 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write   # required for OIDC trusted publisher auth
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Verify data files in wheel
+        run: |
+          python - <<'EOF'
+          import zipfile, glob, sys
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          missing = []
+          for required in ["spade/data/dunbrack_rotamers.pkl", "spade/templates/report.html.j2"]:
+              if not any(required in n for n in names):
+                  missing.append(required)
+          if missing:
+              print("ERROR: wheel is missing required data files:", missing)
+              sys.exit(1)
+          print("OK: wheel contains all required data files")
+          EOF
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: pypi
+      url: https://pypi.org/project/spade-docking/
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No API token needed — uses OIDC trusted publisher.
+        # One-time setup on PyPI:
+        #   pypi.org → Account → Publishing → Add a new publisher
+        #   Owner: ChandraguptSharma07  Repo: Spade
+        #   Workflow: publish.yml  Environment: pypi
