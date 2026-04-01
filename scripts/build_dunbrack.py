@@ -23,11 +23,15 @@ from pathlib import Path
 BBDEP_URL = "https://dunbrack.fccc.edu/bbdep2010/bbdep02.May.lib.gz"
 OUT_PATH = Path(__file__).parent.parent / "spade" / "data" / "dunbrack_rotamers.pkl"
 
-# Residues with no meaningful rotamer space — handled as special cases in repacker
+# GLY has no side chain at all — no chi angles possible
+# ALA has only a methyl group — no rotatable chi angles
+# Both are explicitly excluded from the rotamer library; the repacker handles them separately
 SKIP_RESIDUES = {"GLY", "ALA"}
 
-# Proline has highly restricted rotamer space (pyrrolidine ring constrains chi1, chi2)
-PRO_CHI_RANGE = (-30.0, 30.0)  # degrees around nominal values
+# PRO chi angles are constrained by the pyrrolidine ring; we keep PRO entries
+# but the repacker will clamp sampled chi values to physically valid ranges
+# Nominal ring geometry: chi1 ~ -25 or +25 deg, chi2 ~ +38 or -38 deg
+PRO_NOMINAL_CHI = [(-25.0, 38.0), (25.0, -38.0)]  # (chi1, chi2) for Cg-exo / Cg-endo
 
 
 def download_library(url: str) -> bytes:
