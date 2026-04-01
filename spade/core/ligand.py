@@ -9,7 +9,7 @@ Silently picking one enantiomer is not acceptable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 try:
@@ -26,7 +26,6 @@ except ImportError as e:
     ) from e
 
 try:
-    import meeko
     from meeko import MoleculePreparation
 except ImportError as e:
     raise ImportError("Meeko is required: pip install meeko") from e
@@ -149,7 +148,6 @@ def _enumerate_protomers(mol: Chem.Mol, ph: float) -> list[Chem.Mol]:
         return [mol]
 
     try:
-        smiles = Chem.MolToSmiles(mol)
         protonated = dimorphite_dl.run_with_mol_list(
             [mol],
             min_ph=ph - 0.5,
@@ -217,9 +215,11 @@ def _generate_3d(mol: Chem.Mol, n_conformers: int = 10) -> Optional[Chem.Mol]:
     params.randomSeed = 42
     params.numThreads = 1
 
-    result = AllChem.EmbedMolecule(mol_h, params)
+    # EmbedMultipleConfs for flexibility; we use the first conformer for docking prep
+    ids = AllChem.EmbedMultipleConfs(mol_h, numConfs=n_conformers, params=params)
+    result = 0 if ids else -1
     if result == -1:
-        # Fallback: try without ETKDGv3
+        # Fallback: single conformer with ETKDG
         result = AllChem.EmbedMolecule(mol_h, AllChem.ETKDG())
     if result == -1:
         return None
@@ -238,9 +238,20 @@ def _prepare_pdbqt(mol: Chem.Mol) -> Optional[str]:
     Returns None if Meeko fails (e.g. unsupported element).
     """
     try:
+        from meeko import PDBQTWriterLegacy
         prep = MoleculePreparation()
-        prep.prepare(mol)
-        pdbqt_lines = prep.write_pdbqt_string()
-        return pdbqt_lines
+        mol_setups = prep.prepare(mol)
+        if not mol_setups:
+            return None
+        pdbqt_string, is_ok, error_msg = PDBQTWriterLegacy.write_string(mol_setups[0])
+        if not is_ok:
+            return None
+        return pdbqt_string
     except Exception:
-        return None
+        # Fall back to legacy API for older Meeko versions
+        try:
+            prep = MoleculePreparation()
+            prep.prepare(mol)
+            return prep.write_pdbqt_string()  # type: ignore[attr-defined]
+        except Exception:
+            return None
