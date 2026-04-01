@@ -215,6 +215,10 @@ def _parse_pae_json(data: dict | list) -> np.ndarray:
             "Expected 'predicted_aligned_error' (v1/v2) or 'pae' (v3/v4)."
         )
 
+    # NOTE on indexing: PAE[i, j] = error when residue j is used as reference to
+    # predict residue i's position. Row = aligned residue, col = reference residue.
+    # EBI JSON is stored row-major: outer list = rows (aligned), inner = cols (reference).
+    # np.array() preserves this ordering correctly — no transpose needed.
     matrix = np.array(raw, dtype=np.float32)
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         raise StructureParseError(
