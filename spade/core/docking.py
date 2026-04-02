@@ -304,7 +304,13 @@ class UniDockDockingEngine(BaseDockingEngine):
             return []
         try:
             return self._dock_batch_gpu(conformer, ligands, bbox, n_poses, conf_idx)
-        except Exception:
+        except Exception as _e:
+            import warnings
+            warnings.warn(
+                f"UniDock --gpu_batch failed, falling back to sequential dock() calls.\n"
+                f"Error: {_e}",
+                stacklevel=2,
+            )
             results = []
             for lig in ligands:
                 results.append(self.dock(conformer, lig, bbox, n_poses, conf_idx))
@@ -575,15 +581,18 @@ def _detect_gpu_device_ids() -> list[int]:
     return [0]
 
 
-def _run_subprocess(cmd: list[str], cwd: str, label: str) -> None:
-    """Run an external command, raising RuntimeError with output on failure."""
+def _run_subprocess(cmd: list[str], cwd: str, label: str) -> str:
+    """Run an external command, raising RuntimeError with output on failure.
+    Returns combined stdout+stderr on success for caller inspection."""
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    combined = result.stdout + result.stderr
     if result.returncode != 0:
         raise RuntimeError(
             f"{label} failed (exit {result.returncode}).\n"
             f"stdout: {result.stdout[-2000:]}\n"
             f"stderr: {result.stderr[-2000:]}"
         )
+    return combined
 
 
 def _parse_vina_pdbqt_output(
