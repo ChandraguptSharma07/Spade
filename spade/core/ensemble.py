@@ -71,7 +71,7 @@ class EnsembleGenerator:
         Returns list[AtomGroup] — each with attributes conformer_index and ca_rmsd_from_ref.
         """
         anm, ca_sel = self._build_anm()
-        mode_weights = self._select_mode_weights(anm)
+        mode_weights = self._select_mode_weights(anm, ca_sel)
 
         candidates: list["prody.AtomGroup"] = []
         amplitudes = np.linspace(0.3, 1.0, self.n_conformers * 3)  # oversample, then filter
@@ -148,13 +148,14 @@ class EnsembleGenerator:
         anm.calcModes(n_modes)
         return anm, ca_sel
 
-    def _select_mode_weights(self, anm: "prody.ANM") -> np.ndarray:
+    def _select_mode_weights(self, anm: "prody.ANM", ca_sel: "prody.Selection") -> np.ndarray:
         """
         Return per-mode weights derived from the PAE flexibility profile.
         Modes that correspond to flexible regions get higher weights.
         """
         n_modes = len(anm)
-        mode_weights = self.profile.mode_weight_vector
+        residue_weights = self.profile.mode_weight_vector
+        ca_resindices = np.array([atom.getResindex() for atom in ca_sel])
 
         # Map residue weights to modes: weight each mode by its collectivity
         # times the mean residue weight of its contributors
@@ -163,10 +164,15 @@ class EnsembleGenerator:
             mode = anm[i]
             # Eigenvalue (frequency) inversely scales displacement importance
             eig = mode.getEigval()
+            
+            eigvec = mode.getEigvec().reshape(-1, 3)
+            sq_disp = (eigvec ** 2).sum(axis=1)
+            mode_flex_weight = (sq_disp * residue_weights[ca_resindices]).sum()
+
             if eig > 0:
-                weights[i] = 1.0 / eig
+                weights[i] = (1.0 / eig) * mode_flex_weight
             else:
-                weights[i] = 1.0
+                weights[i] = mode_flex_weight
 
         # Normalize
         total = weights.sum()
@@ -196,6 +202,7 @@ class EnsembleGenerator:
         # Compute displacement vector from weighted combination of modes
         n_modes = len(anm)
         displacement = np.zeros((n_ca, 3), dtype=float)
+        scale_factor = np.sqrt(3 * n_ca)
 
         for i in range(n_modes):
             mode = anm[i]
@@ -207,7 +214,7 @@ class EnsembleGenerator:
                 continue
             # Random sign to explore both directions
             sign = np.random.choice([-1, 1])
-            displacement += sign * w * amplitude * eigvec
+            displacement += sign * w * amplitude * scale_factor * eigvec
 
         # Apply Cα displacement and propagate to whole residues
         ca_resnums = ca_sel.getResnums()
@@ -226,9 +233,16 @@ class EnsembleGenerator:
         ref: "prody.AtomGroup",
         mob: "prody.AtomGroup",
     ) -> float:
-        """Compute Cα RMSD between two AtomGroups (no superposition)."""
-        ref_ca = ref.select("name CA")
-        mob_ca = mob.select("name CA")
+        """Compute Cα RMSD between two AtomGroups over the pocket residues only."""
+        pocket_res = self.profile.pocket_residues
+        if len(pocket_res) == 0:
+            sel_str = "name CA"
+        else:
+            resnum_list = " ".join(str(r) for r in _residue_indices_to_resnums(ref, pocket_res))
+            sel_str = f"name CA and resnum {resnum_list}"
+
+        ref_ca = ref.select(sel_str)
+        mob_ca = mob.select(sel_str)
         if ref_ca is None or mob_ca is None:
             return 0.0
         n = min(len(ref_ca), len(mob_ca))
