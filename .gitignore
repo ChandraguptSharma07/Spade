@@ -40,3 +40,6 @@ Thumbs.db
 
 # Large data files (build locally via scripts/build_dunbrack.py)
 spade/data/dunbrack_rotamers.pkl
+
+# Results folder for development process
+spade_results/
