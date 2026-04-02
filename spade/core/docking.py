@@ -132,7 +132,8 @@ def compute_bounding_box(
     else:
         span = np.zeros(3)
     size = span + 2 * padding
-    size = np.maximum(size, np.array([15.0, 15.0, 15.0]))
+    # Conform to Vina constraints: Minimum 15A^3 for stability, Maximum 30A^3 to prevent UniDock memory segfaults
+    size = np.clip(size, 15.0, 30.0)
 
     return BoundingBox(center=center, size=size)
 
