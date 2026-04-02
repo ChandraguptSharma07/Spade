@@ -515,7 +515,10 @@ def dock_ensemble(
 
         if n_workers == 1:
             results = []
+            n_conf = len(conf_args)
             for args in conf_args:
+                conf_idx = args[0]
+                print(f"  [GPU] conformer {conf_idx + 1}/{n_conf} ...", flush=True)
                 results.extend(_run_conformer(args))
             return results
 
