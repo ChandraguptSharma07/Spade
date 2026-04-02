@@ -221,6 +221,11 @@ def _try_prolif(
                     except OSError:
                         pass
 
+        # If ProLIF completely failed to find any pharmacophores due to missing hydrogens, 
+        # force fallback to the highly robust structural distance histogram.
+        if np.sum(fps) == 0:
+            return [], False
+
         return fps, True
 
     except Exception as exc:
