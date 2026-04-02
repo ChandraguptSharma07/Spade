@@ -3,16 +3,21 @@ docking.py — Ensemble docking with pluggable CPU/GPU backends.
 
 Backend options
 ---------------
-"cpu"  — AutoDock Vina Python bindings (conda install -c conda-forge vina)
-"gpu"  — Vina-GPU 2.0 via subprocess   (see https://github.com/DeltaGroupNJUPT/Vina-GPU-2.0)
+"cpu"  — AutoDock Vina Python bindings (pip install vina)
+"gpu"  — gnina via subprocess            (pip install gnina)
 
-Both backends use the Vina scoring function — scores are directly comparable
-across backends and with the CPU baseline.
+Scoring functions
+-----------------
+cpu  : Vina empirical scoring function
+gpu  : gnina CNN scoring function (Vina search + CNN rescore)
+       Scores are NOT numerically comparable to CPU Vina — both rigid and
+       ensemble runs must use the same backend for valid comparison.
+       gnina is more accurate on pose prediction (McNutt et al. 2021).
 
 CRITICAL: The bounding box must be recomputed for EVERY conformer individually.
 NMA perturbation shifts the geometric centre of the pocket by 1-2 Å across
-conformers. A static bounding box means Vina docks off-centre in perturbed
-conformers and returns scores for the wrong region — silently, without error.
+conformers. A static bounding box means the docking engine scores the wrong
+region — silently, without error.
 compute_bounding_box() is therefore a standalone function that must be called
 inside the per-conformer loop, never cached.
 """
@@ -46,8 +51,7 @@ try:
 except ImportError:
     pass
 
-# Vina-GPU 2.x ships under several binary names depending on version and platform
-_VINA_GPU_BINS = ["Vina-GPU-2-1", "Vina-GPU-2-0", "Vina-GPU", "vina_gpu"]
+_GNINA_BINS = ["gnina"]
 
 
 # ---------------------------------------------------------------------------
@@ -210,31 +214,41 @@ class VinaDockingEngine(BaseDockingEngine):
 
 
 # ---------------------------------------------------------------------------
-# GPU backend — Vina-GPU 2.0
+# GPU backend — gnina
 # ---------------------------------------------------------------------------
 
-class VinaGPUDockingEngine(BaseDockingEngine):
+class GninaDockingEngine(BaseDockingEngine):
     """
-    GPU-accelerated backend using Vina-GPU 2.0.
+    GPU-accelerated backend using gnina (Ragoza et al. 2017, McNutt et al. 2021).
 
-    Uses the same Vina scoring function as VinaDockingEngine — scores are
-    directly comparable to the CPU baseline with no calibration required.
+    gnina uses Vina's Monte Carlo search with a CNN scoring function trained on
+    PDBbind. More accurate than empirical Vina on pose prediction. Scores are
+    NOT numerically comparable to CPU Vina — use the same backend for both
+    rigid and ensemble runs when comparing.
 
-    Install: download a pre-compiled binary from
-      https://github.com/DeltaGroupNJUPT/Vina-GPU-2.0/releases
-    and place it on PATH, or on Kaggle:
-      !wget <release_url> -O /usr/local/bin/Vina-GPU-2-1 && chmod +x /usr/local/bin/Vina-GPU-2-1
+    Install: pip install gnina
+
+    Reference: McNutt et al. (2021) gnina 1.0: molecular docking with deep
+    learning. J. Cheminformatics 13, 43. https://doi.org/10.1186/s13321-021-00522-2
 
     Parameters
     ----------
-    exhaustiveness : same meaning as Vina CPU (default 8)
-    device_id      : GPU device index, 0-based (default 0)
+    exhaustiveness : Vina-style exhaustiveness (default 8)
+    device_id      : CUDA device index, 0-based (default 0)
+    cnn_scoring    : gnina CNN scoring mode — "rescore" (fast, recommended),
+                     "refinement", or "metrorescore" (most accurate, slowest)
     """
 
-    def __init__(self, exhaustiveness: int = 8, device_id: int = 0) -> None:
-        self._bin = _find_binary(_VINA_GPU_BINS, "Vina-GPU")
+    def __init__(
+        self,
+        exhaustiveness: int = 8,
+        device_id: int = 0,
+        cnn_scoring: str = "rescore",
+    ) -> None:
+        self._bin = _find_binary(_GNINA_BINS, "gnina")
         self.exhaustiveness = exhaustiveness
         self.device_id = device_id
+        self.cnn_scoring = cnn_scoring
 
     def dock(
         self,
@@ -247,7 +261,7 @@ class VinaGPUDockingEngine(BaseDockingEngine):
         with tempfile.TemporaryDirectory() as tmpdir:
             receptor_path = os.path.join(tmpdir, "receptor.pdbqt")
             ligand_path = os.path.join(tmpdir, "ligand.pdbqt")
-            out_path = os.path.join(tmpdir, "out.pdbqt")
+            out_path = os.path.join(tmpdir, "out.sdf")  # gnina outputs SDF by default
 
             with open(receptor_path, "w") as fh:
                 fh.write(_atomgroup_to_pdbqt(conformer))
@@ -270,14 +284,16 @@ class VinaGPUDockingEngine(BaseDockingEngine):
                     "--size_z", f"{sz:.3f}",
                     "--exhaustiveness", str(self.exhaustiveness),
                     "--num_modes", str(n_poses),
-                    "--gpu_id", str(self.device_id),
+                    "--device", str(self.device_id),
+                    "--cnn_scoring", self.cnn_scoring,
                     "--out", out_path,
+                    "--quiet",
                 ],
                 cwd=tmpdir,
-                label="Vina-GPU",
+                label="gnina",
             )
 
-            return _parse_vina_pdbqt_output(out_path, conf_idx, n_poses)
+            return _parse_gnina_sdf_output(out_path, conf_idx, n_poses)
 
 
 # ---------------------------------------------------------------------------
@@ -286,22 +302,20 @@ class VinaGPUDockingEngine(BaseDockingEngine):
 
 def _find_binary(candidates: list[str], label: str) -> str:
     """
-    Locate a binary by name, checking PATH and the Kaggle/Colab conda prefix.
+    Locate a binary by name, checking PATH and common Kaggle/Colab install paths.
     Raises FileNotFoundError with install instructions if not found.
     """
+    search_prefixes = ["", "/opt/conda/bin/", "/usr/local/bin/", "/usr/bin/"]
     for name in candidates:
-        path = shutil.which(name)
-        if path:
-            return path
-        # Kaggle/Colab: conda installs to /opt/conda/bin but it may not be on PATH
-        fallback = f"/opt/conda/bin/{name}"
-        if os.path.exists(fallback):
-            return fallback
+        for prefix in search_prefixes:
+            path = shutil.which(name) if not prefix else None
+            candidate_path = f"{prefix}{name}" if prefix else None
+            if path:
+                return path
+            if candidate_path and os.path.isfile(candidate_path) and os.path.getsize(candidate_path) > 1000:
+                return candidate_path
     raise FileNotFoundError(
-        f"{label} executable not found. "
-        "Download a pre-compiled binary from "
-        "https://github.com/DeltaGroupNJUPT/Vina-GPU-2.0/releases "
-        "and place it on PATH."
+        f"{label} executable not found. Install with: pip install {candidates[0]}"
     )
 
 
@@ -309,20 +323,27 @@ def get_docking_engine(
     backend: str = "cpu",
     exhaustiveness: int = 8,
     device_id: int = 0,
+    cnn_scoring: str = "rescore",
 ) -> BaseDockingEngine:
     """
     Factory — return a configured docking engine.
 
     Parameters
     ----------
-    backend        : "cpu" (Vina Python bindings) or "gpu" (Vina-GPU 2.0)
+    backend        : "cpu" (Vina) or "gpu" (gnina)
     exhaustiveness : search exhaustiveness, same meaning for both backends
     device_id      : (gpu only) CUDA device index, 0-based
+    cnn_scoring    : (gpu only) gnina CNN scoring mode: "rescore", "refinement",
+                     or "metrorescore"
     """
     if backend == "cpu":
         return VinaDockingEngine(exhaustiveness=exhaustiveness)
     elif backend == "gpu":
-        return VinaGPUDockingEngine(exhaustiveness=exhaustiveness, device_id=device_id)
+        return GninaDockingEngine(
+            exhaustiveness=exhaustiveness,
+            device_id=device_id,
+            cnn_scoring=cnn_scoring,
+        )
     else:
         raise ValueError(f"Unknown backend {backend!r}. Choose 'cpu' or 'gpu'.")
 
@@ -350,7 +371,7 @@ def dock_ensemble(
     pocket_residues : 0-based residue indices defining the pocket
     exhaustiveness  : Vina exhaustiveness; same meaning for cpu and gpu backends
     n_poses         : number of poses to return per ligand per conformer
-    backend         : "cpu" (Vina) or "gpu" (Vina-GPU 2.0)
+    backend         : "cpu" (Vina) or "gpu" (gnina)
     device_ids      : (gpu only) list of CUDA device indices to use.
                       Defaults to None — auto-detected via nvidia-smi.
                       CPU backend ignores this parameter.
@@ -486,6 +507,76 @@ def _parse_vina_pdbqt_output(
                     coords.append([x, y, z])
                 except (ValueError, IndexError):
                     continue
+
+        if score is None:
+            continue
+
+        results.append(PoseResult(
+            pose_index=i,
+            score_kcal_mol=score,
+            coordinates=np.array(coords, dtype=np.float32) if coords else np.zeros((1, 3), dtype=np.float32),
+            conformer_index=conf_idx,
+        ))
+
+    return results
+
+
+def _parse_gnina_sdf_output(
+    out_path: str,
+    conf_idx: int,
+    n_poses: int,
+) -> list[PoseResult]:
+    """
+    Parse a gnina output SDF file into PoseResult objects.
+
+    gnina writes one molecule block per pose. Each block contains a property:
+      > <minimizedAffinity>
+      -7.50
+
+    Coordinates are in the standard SDF atom block (columns 1-3 of the atom table).
+    """
+    if not os.path.exists(out_path):
+        return []
+
+    with open(out_path) as fh:
+        content = fh.read()
+
+    results: list[PoseResult] = []
+    # SDF molecules are separated by "$$$$"
+    blocks = [b.strip() for b in content.split("$$$$") if b.strip()]
+
+    for i, block in enumerate(blocks[:n_poses]):
+        score: Optional[float] = None
+        coords: list[list[float]] = []
+        lines = block.splitlines()
+
+        # Parse score from SDF property block
+        for j, line in enumerate(lines):
+            if "minimizedAffinity" in line or "CNNaffinity" in line:
+                # Value is on the next non-empty line
+                for k in range(j + 1, min(j + 4, len(lines))):
+                    try:
+                        score = float(lines[k].strip())
+                        break
+                    except ValueError:
+                        continue
+                if score is not None:
+                    break
+
+        # Parse coordinates from atom block
+        # SDF atom block starts after the counts line (4th line of header)
+        # Format: xxxxx.xxxxyyyyy.yyyyzzzzz.zzzz ...
+        counts_line_idx = 3  # 0-indexed: title, program, comment, counts
+        if len(lines) > counts_line_idx:
+            try:
+                n_atoms = int(lines[counts_line_idx].split()[0])
+                for atom_line in lines[counts_line_idx + 1: counts_line_idx + 1 + n_atoms]:
+                    parts = atom_line.split()
+                    if len(parts) >= 3:
+                        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                        coords.append([x, y, z])
+            except (ValueError, IndexError):
+                pass
 
         if score is None:
             continue
