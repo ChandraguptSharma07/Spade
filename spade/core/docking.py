@@ -4,7 +4,10 @@ docking.py — Ensemble docking with pluggable CPU/GPU backends.
 Backend options
 ---------------
 "cpu"  — AutoDock Vina Python bindings (conda install -c conda-forge vina)
-"gpu"  — AutoDock-GPU via subprocess   (conda install -c conda-forge autodock-gpu autogrid)
+"gpu"  — Vina-GPU 2.0 via subprocess   (see https://github.com/DeltaGroupNJUPT/Vina-GPU-2.0)
+
+Both backends use the Vina scoring function — scores are directly comparable
+across backends and with the CPU baseline.
 
 CRITICAL: The bounding box must be recomputed for EVERY conformer individually.
 NMA perturbation shifts the geometric centre of the pocket by 1-2 Å across
@@ -42,6 +45,9 @@ try:
     _VINA_AVAILABLE = True
 except ImportError:
     pass
+
+# Vina-GPU 2.x ships under several binary names depending on version and platform
+_VINA_GPU_BINS = ["Vina-GPU-2-1", "Vina-GPU-2-0", "Vina-GPU", "vina_gpu"]
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +150,7 @@ class BaseDockingEngine(ABC):
 
 
 # ---------------------------------------------------------------------------
-# CPU backend — AutoDock Vina
+# CPU backend — AutoDock Vina (Python bindings)
 # ---------------------------------------------------------------------------
 
 class VinaDockingEngine(BaseDockingEngine):
@@ -204,61 +210,31 @@ class VinaDockingEngine(BaseDockingEngine):
 
 
 # ---------------------------------------------------------------------------
-# GPU backend — AutoDock-GPU
+# GPU backend — Vina-GPU 2.0
 # ---------------------------------------------------------------------------
 
-# AutoDock-GPU ships several binaries named by work-group size.
-# We try them in order of preference (128 is the standard Kaggle/T4 choice).
-_AUTODOCK_GPU_BINS = [
-    "autodock_gpu_128wi",
-    "autodock_gpu_64wi",
-    "autodock_gpu_256wi",
-    "autodock_gpu",
-]
-
-_AUTOGRID_BIN = "autogrid4"
-_AUTODOCK_GPU_SPACING = 0.375   # Å — standard grid spacing
-
-
-class AutoDockGPUDockingEngine(BaseDockingEngine):
+class VinaGPUDockingEngine(BaseDockingEngine):
     """
-    GPU-accelerated backend using AutoDock-GPU + autogrid4.
+    GPU-accelerated backend using Vina-GPU 2.0.
 
-    Install: conda install -c conda-forge autodock-gpu autogrid
+    Uses the same Vina scoring function as VinaDockingEngine — scores are
+    directly comparable to the CPU baseline with no calibration required.
 
-    Scoring function: AutoDock4 (slightly different from Vina — scores are
-    typically 0.5–1 kcal/mol more negative; not directly comparable to Vina
-    results but internally consistent across runs).
+    Install: download a pre-compiled binary from
+      https://github.com/DeltaGroupNJUPT/Vina-GPU-2.0/releases
+    and place it on PATH, or on Kaggle:
+      !wget <release_url> -O /usr/local/bin/Vina-GPU-2-1 && chmod +x /usr/local/bin/Vina-GPU-2-1
 
     Parameters
     ----------
-    n_runs       : number of independent GA runs per docking call (default 20).
-                   More runs → better pose sampling, proportionally longer runtime.
-    device_id    : GPU device index (default 0). Set to 1 on multi-GPU Kaggle nodes.
+    exhaustiveness : same meaning as Vina CPU (default 8)
+    device_id      : GPU device index, 0-based (default 0)
     """
 
-    def __init__(self, n_runs: int = 20, device_id: int = 0) -> None:
-        self._gpu_bin = self._find_binary(_AUTODOCK_GPU_BINS, "AutoDock-GPU")
-        self._grid_bin = self._find_binary([_AUTOGRID_BIN], "autogrid4")
-        self.n_runs = n_runs
+    def __init__(self, exhaustiveness: int = 8, device_id: int = 0) -> None:
+        self._bin = _find_binary(_VINA_GPU_BINS, "Vina-GPU")
+        self.exhaustiveness = exhaustiveness
         self.device_id = device_id
-
-    @staticmethod
-    def _find_binary(candidates: list[str], label: str) -> str:
-        for name in candidates:
-            path = shutil.which(name)
-            if path:
-                return path
-            # Fallback for Kaggle / Colab environments where conda binaries
-            # are placed in /opt/conda/bin but pip/jupyter python ignores it.
-            fallback_path = f"/opt/conda/bin/{name}"
-            if os.path.exists(fallback_path):
-                return fallback_path
-
-        raise FileNotFoundError(
-            f"{label} executable not found. "
-            "Install with: conda install -c conda-forge autodock-gpu autogrid"
-        )
 
     def dock(
         self,
@@ -269,105 +245,84 @@ class AutoDockGPUDockingEngine(BaseDockingEngine):
         conf_idx: int,
     ) -> list[PoseResult]:
         with tempfile.TemporaryDirectory() as tmpdir:
-            return self._dock_in_tmpdir(conformer, ligand, bbox, n_poses, conf_idx, tmpdir)
+            receptor_path = os.path.join(tmpdir, "receptor.pdbqt")
+            ligand_path = os.path.join(tmpdir, "ligand.pdbqt")
+            out_path = os.path.join(tmpdir, "out.pdbqt")
 
-    def _dock_in_tmpdir(
-        self,
-        conformer: "prody.AtomGroup",
-        ligand: PreparedLigand,
-        bbox: BoundingBox,
-        n_poses: int,
-        conf_idx: int,
-        tmpdir: str,
-    ) -> list[PoseResult]:
-        receptor_pdbqt = os.path.join(tmpdir, "receptor.pdbqt")
-        ligand_pdbqt = os.path.join(tmpdir, "ligand.pdbqt")
-        gpf_path = os.path.join(tmpdir, "receptor.gpf")
-        dpf_path = os.path.join(tmpdir, "ligand.dpf")
-        dlg_path = os.path.join(tmpdir, "ligand.dlg")
+            with open(receptor_path, "w") as fh:
+                fh.write(_atomgroup_to_pdbqt(conformer))
+            with open(ligand_path, "w") as fh:
+                fh.write(ligand.pdbqt_string)
 
-        # Write receptor and ligand PDBQT files
-        with open(receptor_pdbqt, "w") as fh:
-            fh.write(_atomgroup_to_pdbqt(conformer))
-        with open(ligand_pdbqt, "w") as fh:
-            fh.write(ligand.pdbqt_string)
+            cx, cy, cz = bbox.center
+            sx, sy, sz = bbox.size
 
-        # Determine atom types present in receptor and ligand
-        receptor_types = _extract_atom_types(_atomgroup_to_pdbqt(conformer))
-        ligand_types = _extract_atom_types(ligand.pdbqt_string)
+            _run_subprocess(
+                [
+                    self._bin,
+                    "--receptor", receptor_path,
+                    "--ligand", ligand_path,
+                    "--center_x", f"{cx:.3f}",
+                    "--center_y", f"{cy:.3f}",
+                    "--center_z", f"{cz:.3f}",
+                    "--size_x", f"{sx:.3f}",
+                    "--size_y", f"{sy:.3f}",
+                    "--size_z", f"{sz:.3f}",
+                    "--exhaustiveness", str(self.exhaustiveness),
+                    "--num_modes", str(n_poses),
+                    "--gpu_id", str(self.device_id),
+                    "--out", out_path,
+                ],
+                cwd=tmpdir,
+                label="Vina-GPU",
+            )
 
-        # Write GPF for autogrid4
-        npts = _box_size_to_npts(bbox.size, _AUTODOCK_GPU_SPACING)
-        gpf_content = _write_gpf(
-            receptor_pdbqt=receptor_pdbqt,
-            center=bbox.center,
-            npts=npts,
-            spacing=_AUTODOCK_GPU_SPACING,
-            receptor_types=receptor_types,
-            ligand_types=ligand_types,
-        )
-        with open(gpf_path, "w") as fh:
-            fh.write(gpf_content)
-
-        # Run autogrid4
-        _run_subprocess(
-            [self._grid_bin, "-p", gpf_path, "-l", os.path.join(tmpdir, "autogrid.log")],
-            cwd=tmpdir,
-            label="autogrid4",
-        )
-
-        # Write DPF for autodock_gpu
-        fld_path = os.path.join(tmpdir, "receptor.maps.fld")
-        dpf_content = _write_dpf(
-            fld_path=fld_path,
-            ligand_pdbqt=ligand_pdbqt,
-            ligand_types=ligand_types,
-            n_runs=self.n_runs,
-        )
-        with open(dpf_path, "w") as fh:
-            fh.write(dpf_content)
-
-        # Run autodock_gpu
-        _run_subprocess(
-            [
-                self._gpu_bin,
-                "--ffile", fld_path,
-                "--lfile", ligand_pdbqt,
-                "--resnam", os.path.join(tmpdir, "ligand"),
-                "--nrun", str(self.n_runs),
-                "--devnum", str(self.device_id + 1),  # autodock_gpu uses 1-based device index
-            ],
-            cwd=tmpdir,
-            label="autodock_gpu",
-        )
-
-        return _parse_dlg(dlg_path, conf_idx, n_poses)
+            return _parse_vina_pdbqt_output(out_path, conf_idx, n_poses)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+def _find_binary(candidates: list[str], label: str) -> str:
+    """
+    Locate a binary by name, checking PATH and the Kaggle/Colab conda prefix.
+    Raises FileNotFoundError with install instructions if not found.
+    """
+    for name in candidates:
+        path = shutil.which(name)
+        if path:
+            return path
+        # Kaggle/Colab: conda installs to /opt/conda/bin but it may not be on PATH
+        fallback = f"/opt/conda/bin/{name}"
+        if os.path.exists(fallback):
+            return fallback
+    raise FileNotFoundError(
+        f"{label} executable not found. "
+        "Download a pre-compiled binary from "
+        "https://github.com/DeltaGroupNJUPT/Vina-GPU-2.0/releases "
+        "and place it on PATH."
+    )
+
+
 def get_docking_engine(
     backend: str = "cpu",
     exhaustiveness: int = 8,
-    n_runs: int = 20,
     device_id: int = 0,
 ) -> BaseDockingEngine:
     """
-    Factory function — return a configured docking engine.
+    Factory — return a configured docking engine.
 
     Parameters
     ----------
-    backend         : "cpu" for Vina, "gpu" for AutoDock-GPU
-    exhaustiveness  : (cpu only) Vina exhaustiveness parameter
-    n_runs          : (gpu only) number of AutoDock-GPU GA runs
-    device_id       : (gpu only) CUDA device index (0-based)
+    backend        : "cpu" (Vina Python bindings) or "gpu" (Vina-GPU 2.0)
+    exhaustiveness : search exhaustiveness, same meaning for both backends
+    device_id      : (gpu only) CUDA device index, 0-based
     """
     if backend == "cpu":
         return VinaDockingEngine(exhaustiveness=exhaustiveness)
     elif backend == "gpu":
-        return AutoDockGPUDockingEngine(n_runs=n_runs, device_id=device_id)
+        return VinaGPUDockingEngine(exhaustiveness=exhaustiveness, device_id=device_id)
     else:
         raise ValueError(f"Unknown backend {backend!r}. Choose 'cpu' or 'gpu'.")
 
@@ -386,23 +341,24 @@ def dock_ensemble(
 
     For the GPU backend, multiple device_ids enables multi-GPU parallelism —
     jobs are distributed across devices using a thread pool (one thread per GPU).
-    On Kaggle T4 x2, pass device_ids=[0, 1].
+    Kaggle T4 x2 is handled automatically when device_ids is not specified.
 
     Parameters
     ----------
     conformers      : list of ProDy AtomGroup conformers (from EnsembleGenerator)
     ligands         : list of PreparedLigand (may include multiple stereoisomers)
     pocket_residues : 0-based residue indices defining the pocket
-    exhaustiveness  : (cpu) Vina exhaustiveness; ignored for gpu backend
+    exhaustiveness  : Vina exhaustiveness; same meaning for cpu and gpu backends
     n_poses         : number of poses to return per ligand per conformer
-    backend         : "cpu" (Vina) or "gpu" (AutoDock-GPU)
-    device_ids      : (gpu only) list of CUDA device indices to use, e.g. [0, 1].
-                      Defaults to [0] (single GPU). CPU backend ignores this.
+    backend         : "cpu" (Vina) or "gpu" (Vina-GPU 2.0)
+    device_ids      : (gpu only) list of CUDA device indices to use.
+                      Defaults to None — auto-detected via nvidia-smi.
+                      CPU backend ignores this parameter.
     """
     if device_ids is None:
         device_ids = _detect_gpu_device_ids() if backend == "gpu" else [0]
 
-    # Build the flat list of (conformer, ligand) jobs with per-job metadata
+    # Build flat job list with per-job metadata
     jobs: list[tuple[int, "prody.AtomGroup", float, PreparedLigand, BoundingBox]] = []
     for conf_idx, conformer in enumerate(conformers):
         rmsd_data = conformer.getData("ca_rmsd_from_ref")
@@ -412,7 +368,6 @@ def dock_ensemble(
             jobs.append((conf_idx, conformer, ca_rmsd, ligand, bbox))
 
     n_workers = len(device_ids) if backend == "gpu" else 1
-    n_runs = exhaustiveness * 3
 
     def _run_job(
         job_idx: int,
@@ -426,7 +381,6 @@ def dock_ensemble(
         engine = get_docking_engine(
             backend=backend,
             exhaustiveness=exhaustiveness,
-            n_runs=n_runs,
             device_id=device_id,
         )
         t0 = time.perf_counter()
@@ -440,148 +394,22 @@ def dock_ensemble(
             docking_time_seconds=elapsed,
         )
 
-    results: list[DockingResult] = []
-
     if n_workers == 1:
-        # Single worker — no thread overhead, preserves original ordering
-        for job_idx, (conf_idx, conformer, ca_rmsd, ligand, bbox) in enumerate(jobs):
-            results.append(_run_job(job_idx, conf_idx, conformer, ca_rmsd, ligand, bbox))
-    else:
-        # Multi-GPU: submit all jobs, collect in original order
-        futures_ordered = []
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            for job_idx, (conf_idx, conformer, ca_rmsd, ligand, bbox) in enumerate(jobs):
-                future = executor.submit(
-                    _run_job, job_idx, conf_idx, conformer, ca_rmsd, ligand, bbox
-                )
-                futures_ordered.append(future)
-        results = [f.result() for f in futures_ordered]
+        return [
+            _run_job(job_idx, *job)
+            for job_idx, job in enumerate(jobs)
+        ]
 
-    return results
+    # Multi-GPU: submit all jobs, preserve original ordering
+    futures_ordered = []
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for job_idx, job in enumerate(jobs):
+            futures_ordered.append(executor.submit(_run_job, job_idx, *job))
+    return [f.result() for f in futures_ordered]
 
 
 # ---------------------------------------------------------------------------
-# AutoDock-GPU file writers
-# ---------------------------------------------------------------------------
-
-def _box_size_to_npts(size: np.ndarray, spacing: float) -> np.ndarray:
-    """Convert box size in Å to number of grid points (must be even, max 126 for AutoDock-GPU)."""
-    npts = np.ceil(size / spacing).astype(int)
-    # Round up to next even number
-    npts = np.where(npts % 2 == 0, npts, npts + 1)
-    # AutoDock-GPU hard cap
-    npts = np.minimum(npts, 126)
-    return npts
-
-
-def _write_gpf(
-    receptor_pdbqt: str,
-    center: np.ndarray,
-    npts: np.ndarray,
-    spacing: float,
-    receptor_types: list[str],
-    ligand_types: list[str],
-) -> str:
-    """Generate an autogrid4 GPF file content."""
-    all_types = sorted(set(receptor_types) | set(ligand_types))
-    map_lines = "\n".join(f"map receptor.{t}.map" for t in all_types)
-    return (
-        f"npts {npts[0]} {npts[1]} {npts[2]}\n"
-        f"gridfld receptor.maps.fld\n"
-        f"spacing {spacing}\n"
-        f"receptor_types {' '.join(receptor_types)}\n"
-        f"ligand_types {' '.join(ligand_types)}\n"
-        f"receptor {receptor_pdbqt}\n"
-        f"gridcenter {center[0]:.3f} {center[1]:.3f} {center[2]:.3f}\n"
-        f"smooth 0.5\n"
-        f"{map_lines}\n"
-        f"elecmap receptor.e.map\n"
-        f"dsolvmap receptor.d.map\n"
-        f"dielectric -0.1465\n"
-    )
-
-
-def _write_dpf(
-    fld_path: str,
-    ligand_pdbqt: str,
-    ligand_types: list[str],
-    n_runs: int,
-) -> str:
-    """Generate an AutoDock-GPU DPF file content."""
-    map_lines = "\n".join(f"map receptor.{t}.map" for t in ligand_types)
-    return (
-        f"autodock_parameter_version 4.2\n"
-        f"outlev 0\n"
-        f"ligand_types {' '.join(ligand_types)}\n"
-        f"fld {fld_path}\n"
-        f"{map_lines}\n"
-        f"elecmap receptor.e.map\n"
-        f"dsolvmap receptor.d.map\n"
-        f"move {ligand_pdbqt}\n"
-        f"ga_pop_size 150\n"
-        f"ga_num_evals 2500000\n"
-        f"ga_run {n_runs}\n"
-        f"rmstol 2.0\n"
-        f"analysis\n"
-    )
-
-
-# ---------------------------------------------------------------------------
-# AutoDock-GPU DLG parser
-# ---------------------------------------------------------------------------
-
-def _parse_dlg(dlg_path: str, conf_idx: int, n_poses: int) -> list[PoseResult]:
-    """
-    Parse an AutoDock-GPU .dlg output file into PoseResult objects.
-
-    Each run in the DLG produces a docked model block starting with
-    'DOCKED: MODEL'. Scores appear as:
-      DOCKED: USER    Estimated Free Energy of Binding    =  -7.50 kcal/mol
-    """
-    if not os.path.exists(dlg_path):
-        return []
-
-    with open(dlg_path) as fh:
-        content = fh.read()
-
-    results: list[PoseResult] = []
-    blocks = content.split("DOCKED: MODEL")[1:]  # first split is before any model
-
-    for i, block in enumerate(blocks[:n_poses]):
-        score: Optional[float] = None
-        coords: list[list[float]] = []
-
-        for line in block.splitlines():
-            stripped = line.removeprefix("DOCKED: ")
-            if "Estimated Free Energy of Binding" in stripped:
-                try:
-                    score = float(stripped.split("=")[1].split()[0])
-                except (IndexError, ValueError):
-                    pass
-            elif stripped.startswith(("ATOM", "HETATM")):
-                try:
-                    x = float(stripped[30:38])
-                    y = float(stripped[38:46])
-                    z = float(stripped[46:54])
-                    coords.append([x, y, z])
-                except (ValueError, IndexError):
-                    continue
-
-        if score is None:
-            continue
-
-        results.append(PoseResult(
-            pose_index=i,
-            score_kcal_mol=score,
-            coordinates=np.array(coords, dtype=np.float32) if coords else np.zeros((1, 3), dtype=np.float32),
-            conformer_index=conf_idx,
-        ))
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _detect_gpu_device_ids() -> list[int]:
@@ -600,7 +428,11 @@ def _detect_gpu_device_ids() -> list[int]:
             timeout=10,
         )
         if result.returncode == 0:
-            ids = [int(line.strip()) for line in result.stdout.splitlines() if line.strip().isdigit()]
+            ids = [
+                int(line.strip())
+                for line in result.stdout.splitlines()
+                if line.strip().isdigit()
+            ]
             if ids:
                 return ids
     except Exception:
@@ -609,13 +441,8 @@ def _detect_gpu_device_ids() -> list[int]:
 
 
 def _run_subprocess(cmd: list[str], cwd: str, label: str) -> None:
-    """Run an external command, raising RuntimeError on failure."""
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
+    """Run an external command, raising RuntimeError with output on failure."""
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
             f"{label} failed (exit {result.returncode}).\n"
@@ -624,22 +451,58 @@ def _run_subprocess(cmd: list[str], cwd: str, label: str) -> None:
         )
 
 
-def _extract_atom_types(pdbqt_string: str) -> list[str]:
-    """Return unique AutoDock atom types listed in a PDBQT string (last column of ATOM lines)."""
-    types: set[str] = set()
-    for line in pdbqt_string.splitlines():
-        if line.startswith(("ATOM", "HETATM")):
-            parts = line.split()
-            if parts:
-                types.add(parts[-1])
-    # Always include HD (polar hydrogen) and e/d maps for electrostatics/desolvation
-    types.update({"HD"})
-    return sorted(types)
+def _parse_vina_pdbqt_output(
+    out_path: str,
+    conf_idx: int,
+    n_poses: int,
+) -> list[PoseResult]:
+    """
+    Parse a Vina-GPU output PDBQT file into PoseResult objects.
+
+    Vina (CPU and GPU) writes scores as:
+      REMARK VINA RESULT:   -7.50      0.000      0.000
+    followed by ATOM/HETATM lines for that pose.
+    """
+    if not os.path.exists(out_path):
+        return []
+
+    with open(out_path) as fh:
+        content = fh.read()
+
+    results: list[PoseResult] = []
+    for i, block in enumerate(content.split("MODEL")[1:n_poses + 1]):
+        score: Optional[float] = None
+        coords: list[list[float]] = []
+
+        for line in block.splitlines():
+            if line.startswith("REMARK VINA RESULT:"):
+                try:
+                    score = float(line.split(":")[1].split()[0])
+                except (IndexError, ValueError):
+                    pass
+            elif line.startswith(("ATOM", "HETATM")):
+                try:
+                    x, y, z = float(line[30:38]), float(line[38:46]), float(line[46:54])
+                    coords.append([x, y, z])
+                except (ValueError, IndexError):
+                    continue
+
+        if score is None:
+            continue
+
+        results.append(PoseResult(
+            pose_index=i,
+            score_kcal_mol=score,
+            coordinates=np.array(coords, dtype=np.float32) if coords else np.zeros((1, 3), dtype=np.float32),
+            conformer_index=conf_idx,
+        ))
+
+    return results
 
 
 def _atomgroup_to_pdbqt(ag: "prody.AtomGroup") -> str:
     """
-    Convert a ProDy AtomGroup to a minimal PDBQT string for Vina or AutoDock-GPU.
+    Convert a ProDy AtomGroup to a minimal PDBQT string for Vina.
     Uses only heavy atoms; assigns AutoDock atom types naively.
     For production use, prepare the receptor with prepare_receptor4.py or Meeko.
     """
@@ -663,7 +526,7 @@ def _atomgroup_to_pdbqt(ag: "prody.AtomGroup") -> str:
 
 
 def _parse_pdbqt_coords(pdbqt_block: str) -> np.ndarray:
-    """Extract heavy-atom coordinates from a PDBQT pose block (Vina output)."""
+    """Extract heavy-atom coordinates from a PDBQT pose block (Vina CPU output)."""
     coords = []
     for line in pdbqt_block.splitlines():
         if line.startswith(("ATOM", "HETATM")):
