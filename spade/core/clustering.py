@@ -198,17 +198,10 @@ def _try_prolif(
                 fps.append(np.zeros(128, dtype=np.float32))
                 continue
 
-            with tempfile.NamedTemporaryFile(suffix=".sdf", delete=False, mode="w") as lf:
-                writer = Chem.SDWriter(lf.name)
-                writer.write(lig_mol)
-                writer.close()
-                lig_path = lf.name
-
             try:
                 u_rec = mda.Universe(rec_path)
-                u_lig = mda.Universe(lig_path)
                 prot = prolif.Molecule.from_mda(u_rec)
-                lig = prolif.Molecule.from_mda(u_lig)
+                lig = prolif.rdkitmol_to_protein(lig_mol) if hasattr(prolif, 'rdkitmol_to_protein') else prolif.Molecule.from_rdkit(lig_mol)
                 fp = prolif.Fingerprint()
                 fp.run_from_iterable([lig], prot)
                 bv = fp.to_bitvectors()
@@ -219,9 +212,8 @@ def _try_prolif(
                 fps.append(arr)
             finally:
                 # MDAnalysis may hold file handles open on Windows; best-effort cleanup
-                for _p in (rec_path, lig_path):
                     try:
-                        os.unlink(_p)
+                        os.unlink(rec_path)
                     except OSError:
                         pass
 
