@@ -200,7 +200,11 @@ def _try_prolif(
 
             try:
                 u_rec = mda.Universe(rec_path)
-                prot = prolif.Molecule.from_mda(u_rec)
+                try:
+                    prot = prolif.Molecule.from_mda(u_rec, inferrer=None, force=True)
+                except TypeError:
+                    # Older ProLIF versions might not support force/inferrer natively in from_mda
+                    prot = prolif.Molecule.from_mda(u_rec)
                 lig = prolif.rdkitmol_to_protein(lig_mol) if hasattr(prolif, 'rdkitmol_to_protein') else prolif.Molecule.from_rdkit(lig_mol)
                 fp = prolif.Fingerprint()
                 fp.run_from_iterable([lig], prot)
@@ -345,8 +349,12 @@ def _build_clusters(
 
         mean_fp = member_fps.mean(axis=0)
 
-        # Consensus score: reward clusters that appear across many conformers
-        consensus_score = mean_score * (1.0 / max(fraction, 0.01))
+        # Consensus score: mean_score weighted by ensemble coverage.
+        # Multiplying by fraction (0–1) penalises low-coverage clusters by
+        # pulling the score toward 0.  Sorting lowest-first then favours
+        # clusters that are both energetically favourable (negative) and
+        # consistent across many conformers (fraction close to 1).
+        consensus_score = mean_score * fraction
 
         clusters.append(PoseCluster(
             cluster_id=label,
