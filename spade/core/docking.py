@@ -249,6 +249,12 @@ class AutoDockGPUDockingEngine(BaseDockingEngine):
             path = shutil.which(name)
             if path:
                 return path
+            # Fallback for Kaggle / Colab environments where conda binaries
+            # are placed in /opt/conda/bin but pip/jupyter python ignores it.
+            fallback_path = f"/opt/conda/bin/{name}"
+            if os.path.exists(fallback_path):
+                return fallback_path
+
         raise FileNotFoundError(
             f"{label} executable not found. "
             "Install with: conda install -c conda-forge autodock-gpu autogrid"
