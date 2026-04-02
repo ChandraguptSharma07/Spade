@@ -292,36 +292,14 @@ class UniDockDockingEngine(BaseDockingEngine):
         conf_idx: int,
     ) -> list[list[PoseResult]]:
         """
-        Dock multiple ligands against one conformer in a single GPU call.
-        Returns a list of PoseResult lists, one per ligand (preserving order).
-        This is more GPU-efficient than calling dock() in a loop.
+        Dock multiple ligands against one conformer sequentially.
+        Bypasses the experimental UniDock --gpu_batch kernel to physically prevent 
+        hardware deadlocks on Colab T4 hardware when ligand topologies diverge heavily.
         """
-        with tempfile.TemporaryDirectory() as tmpdir:
-            receptor_path = os.path.join(tmpdir, "receptor.pdbqt")
-            out_dir = os.path.join(tmpdir, "out")
-            os.makedirs(out_dir)
-
-            with open(receptor_path, "w") as fh:
-                fh.write(_atomgroup_to_pdbqt(conformer))
-
-            ligand_paths = []
-            for i, ligand in enumerate(ligands):
-                lig_path = os.path.join(tmpdir, f"lig_{i}.pdbqt")
-                with open(lig_path, "w") as fh:
-                    fh.write(ligand.pdbqt_string)
-                ligand_paths.append(lig_path)
-
-            cmd = self._build_cmd(receptor_path, bbox, n_poses)
-            cmd += ["--gpu_batch"] + ligand_paths + ["--dir", out_dir]
-
-            _run_subprocess(cmd, cwd=tmpdir, label="unidock")
-
-            results = []
-            for i in range(len(ligands)):
-                # UniDock names batch outputs as {stem}_out.pdbqt
-                out_path = os.path.join(out_dir, f"lig_{i}_out.pdbqt")
-                results.append(_parse_vina_pdbqt_output(out_path, conf_idx, n_poses))
-            return results
+        results = []
+        for lig in ligands:
+            results.append(self.dock(conformer, lig, bbox, n_poses, conf_idx))
+        return results
 
     def _build_cmd(
         self,
