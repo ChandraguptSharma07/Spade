@@ -292,14 +292,60 @@ class UniDockDockingEngine(BaseDockingEngine):
         conf_idx: int,
     ) -> list[list[PoseResult]]:
         """
-        Dock multiple ligands against one conformer sequentially.
-        Bypasses the experimental UniDock --gpu_batch kernel to physically prevent 
-        hardware deadlocks on Colab T4 hardware when ligand topologies diverge heavily.
+        Dock multiple ligands against one conformer in a single GPU call using
+        UniDock's --gpu_batch flag. All ligands are submitted together so the
+        GPU kernel stays occupied for the full batch duration, producing real
+        GPU utilisation instead of a series of short-lived subprocesses.
+
+        Falls back to sequential dock() calls if --gpu_batch fails (e.g. on
+        unusual topologies or driver incompatibilities).
         """
-        results = []
-        for lig in ligands:
-            results.append(self.dock(conformer, lig, bbox, n_poses, conf_idx))
-        return results
+        if not ligands:
+            return []
+        try:
+            return self._dock_batch_gpu(conformer, ligands, bbox, n_poses, conf_idx)
+        except Exception:
+            results = []
+            for lig in ligands:
+                results.append(self.dock(conformer, lig, bbox, n_poses, conf_idx))
+            return results
+
+    def _dock_batch_gpu(
+        self,
+        conformer: "prody.AtomGroup",
+        ligands: list[PreparedLigand],
+        bbox: BoundingBox,
+        n_poses: int,
+        conf_idx: int,
+    ) -> list[list[PoseResult]]:
+        """Internal: true --gpu_batch call — all ligands in one subprocess."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            receptor_path = os.path.join(tmpdir, "receptor.pdbqt")
+            out_dir = os.path.join(tmpdir, "out")
+            os.makedirs(out_dir)
+
+            with open(receptor_path, "w") as fh:
+                fh.write(_atomgroup_to_pdbqt(conformer))
+
+            ligand_paths = []
+            for i, lig in enumerate(ligands):
+                lpath = os.path.join(tmpdir, f"lig_{i:04d}.pdbqt")
+                with open(lpath, "w") as fh:
+                    fh.write(lig.pdbqt_string)
+                ligand_paths.append(lpath)
+
+            cmd = self._build_cmd(receptor_path, bbox, n_poses)
+            # Replace --receptor (already in cmd) with gpu_batch args
+            cmd += ["--gpu_batch"] + ligand_paths + ["--dir", out_dir]
+
+            _run_subprocess(cmd, cwd=tmpdir, label="unidock-batch")
+
+            results = []
+            for i, lpath in enumerate(ligand_paths):
+                stem = os.path.splitext(os.path.basename(lpath))[0]
+                out_file = os.path.join(out_dir, f"{stem}_out.pdbqt")
+                results.append(_parse_vina_pdbqt_output(out_file, conf_idx, n_poses))
+            return results
 
     def _build_cmd(
         self,
