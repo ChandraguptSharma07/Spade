@@ -311,6 +311,24 @@ def _pose_to_mol(template_mol, coords: np.ndarray):
         return None
 
 
+def pose_to_rdkit_mol(template_mol, coords: np.ndarray):
+    """Public alias for _pose_to_mol — build a 3D RDKit Mol from pose coords."""
+    return _pose_to_mol(template_mol, coords)
+
+
+def shape_tanimoto(mol_a, mol_b) -> float:
+    """
+    Shape Tanimoto similarity between two 3D RDKit Mols (0 = no overlap, 1 = identical).
+    Both mols must have at least one conformer.
+    Returns 0.0 on any failure.
+    """
+    try:
+        from rdkit.Chem import rdShapeHelpers
+        return 1.0 - float(rdShapeHelpers.ShapeTanimotoDist(mol_a, mol_b))
+    except Exception:
+        return 0.0
+
+
 def _coordinate_pseudofp(poses: list[PoseResult]) -> list[np.ndarray]:
     """
     Fallback: represent each pose as a 64-bin histogram of its atom coordinates
