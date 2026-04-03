@@ -91,7 +91,7 @@ def cluster_poses(
         return _empty_result()
 
     # Compute PLIF fingerprints for every pose
-    fps = _compute_plif_fingerprints(all_poses, docking_results, conformers, ligand_mol)
+    fps = _compute_plif_fingerprints(all_poses, conformers, ligand_mol)
 
     # Cluster by Tanimoto distance (1 - Tanimoto similarity)
     eps = 1.0 - similarity_threshold
@@ -129,22 +129,23 @@ def cluster_poses(
 
 def _compute_plif_fingerprints(
     poses: list[PoseResult],
-    docking_results: list[DockingResult],
     conformers: list["prody.AtomGroup"],
     ligand_mol,
 ) -> np.ndarray:
     """
-    Attempt ProLIF PLIF for each pose. Falls back to coordinate-based
-    pseudo-fingerprint if ProLIF fails (e.g. in test environments without
-    full MD topology).
+    Compute PLIF fingerprints for every pose using ProLIF.
+
+    Receptors from UniDock/Vina are PDBQT (no hydrogens). pdb2pqr is used to
+    add explicit H with PROPKA pKa-based protonation at pH 7.4 before passing
+    to ProLIF, so H-bond donors/acceptors are correctly assigned.
+
+    Protonation is cached per unique conformer — 5 conformers means 5 pdb2pqr
+    calls (~15s total), not one per pose (which would be 450 calls).
+
+    Falls back to coordinate pseudo-fingerprint if pdb2pqr or ProLIF fails.
 
     Returns float32 array of shape (n_poses, fp_length).
     """
-    # Build a map from conformer_index -> DockingResult for quick lookup
-    conf_to_dr: dict[int, DockingResult] = {}
-    for dr in docking_results:
-        conf_to_dr[dr.conformer_index] = dr
-
     fps = []
     prolif_success = False
 
@@ -152,10 +153,45 @@ def _compute_plif_fingerprints(
         fps, prolif_success = _try_prolif(poses, conformers, ligand_mol)
 
     if not prolif_success:
-        # Coordinate pseudo-fingerprint: bin Cα distances to ligand centroid
+        # Coordinate pseudo-fingerprint: bin atom distances to ligand centroid
         fps = _coordinate_pseudofp(poses)
 
     return np.array(fps, dtype=np.float32)
+
+
+def _protonate_receptor(receptor_ag: "prody.AtomGroup", tmpdir: str) -> Optional[str]:
+    """
+    Write receptor to PDB, run pdb2pqr to add H with PROPKA pKa-based
+    protonation at pH 7.4, return path to protonated PDB.
+    Returns None if pdb2pqr is unavailable or fails.
+    """
+    import io, os, subprocess, shutil
+    from prody import writePDBStream
+
+    pdb2pqr_bin = shutil.which("pdb2pqr30") or shutil.which("pdb2pqr")
+    if pdb2pqr_bin is None:
+        return None
+
+    raw_pdb = os.path.join(tmpdir, "raw.pdb")
+    out_pdb = os.path.join(tmpdir, "protonated.pdb")
+    out_pqr = os.path.join(tmpdir, "out.pqr")
+
+    buf = io.StringIO()
+    writePDBStream(buf, receptor_ag)
+    with open(raw_pdb, "w") as fh:
+        fh.write(buf.getvalue())
+
+    try:
+        result = subprocess.run(
+            [pdb2pqr_bin, "--ff=AMBER", "--with-ph=7.4",
+             "--pdb-output", out_pdb, raw_pdb, out_pqr],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0 and os.path.exists(out_pdb):
+            return out_pdb
+    except Exception:
+        pass
+    return None
 
 
 def _try_prolif(
@@ -164,66 +200,66 @@ def _try_prolif(
     ligand_mol,
 ) -> tuple[list[np.ndarray], bool]:
     """
-    Compute ProLIF fingerprints. Returns (fps, success).
-    On any failure, returns ([], False).
+    Compute ProLIF PLIF fingerprints for every pose.
+
+    Receptors from UniDock are PDBQT (no H). pdb2pqr is used to add explicit
+    hydrogens with PROPKA pH 7.4 protonation before ProLIF sees the receptor,
+    so H-bond donors/acceptors are correctly assigned.
+
+    Protonation is cached per conformer — 5 pdb2pqr calls total (not per pose).
+
+    Returns (fps, success). On any failure returns ([], False).
     """
     try:
         import prolif
         import MDAnalysis as mda
-        from rdkit import Chem
-        import tempfile, os
+        import io, os, shutil, tempfile
+        from prody import writePDBStream
 
-        fps = []
-        for pose in poses:
-            conf_idx = pose.conformer_index
-            if conf_idx >= len(conformers):
-                fps.append(np.zeros(128, dtype=np.float32))
-                continue
+        _tmpdir = tempfile.mkdtemp()
+        try:
+            # --- Protonate each unique conformer once ---
+            protonated_paths: dict[int, str] = {}
+            for conf_idx, receptor_ag in enumerate(conformers):
+                conf_tmpdir = os.path.join(_tmpdir, f"conf_{conf_idx}")
+                os.makedirs(conf_tmpdir)
+                prot_path = _protonate_receptor(receptor_ag, conf_tmpdir)
+                if prot_path is None:
+                    # pdb2pqr unavailable — write plain PDB
+                    plain = os.path.join(conf_tmpdir, "plain.pdb")
+                    buf = io.StringIO()
+                    writePDBStream(buf, receptor_ag)
+                    with open(plain, "w") as fh:
+                        fh.write(buf.getvalue())
+                    prot_path = plain
+                protonated_paths[conf_idx] = prot_path
 
-            receptor_ag = conformers[conf_idx]
+            # --- Compute fingerprint per pose ---
+            fps = []
+            for pose in poses:
+                conf_idx = pose.conformer_index
+                if conf_idx not in protonated_paths:
+                    fps.append(np.zeros(128, dtype=np.float32))
+                    continue
 
-            # Write receptor to temp PDB
-            with tempfile.NamedTemporaryFile(suffix=".pdb", delete=False, mode="w") as rf:
-                import io
-                from prody import writePDBStream
-                buf = io.StringIO()
-                writePDBStream(buf, receptor_ag)
-                rf.write(buf.getvalue())
-                rec_path = rf.name
+                lig_mol_pose = _pose_to_mol(ligand_mol, pose.coordinates)
+                if lig_mol_pose is None:
+                    fps.append(np.zeros(128, dtype=np.float32))
+                    continue
 
-            # Write ligand pose to temp SDF using pose coordinates
-            lig_mol = _pose_to_mol(ligand_mol, pose.coordinates)
-            if lig_mol is None:
-                os.unlink(rec_path)
-                fps.append(np.zeros(128, dtype=np.float32))
-                continue
-
-            try:
-                u_rec = mda.Universe(rec_path)
-                try:
-                    prot = prolif.Molecule.from_mda(u_rec, inferrer=None, force=True)
-                except TypeError:
-                    # Older ProLIF versions might not support force/inferrer natively in from_mda
-                    prot = prolif.Molecule.from_mda(u_rec)
-                lig = prolif.rdkitmol_to_protein(lig_mol) if hasattr(prolif, 'rdkitmol_to_protein') else prolif.Molecule.from_rdkit(lig_mol)
+                u_rec = mda.Universe(protonated_paths[conf_idx])
+                prot = prolif.Molecule.from_mda(u_rec)
+                lig = prolif.Molecule.from_rdkit(lig_mol_pose)
                 fp = prolif.Fingerprint()
                 fp.run_from_iterable([lig], prot)
                 bv = fp.to_bitvectors()
-                if bv:
-                    arr = np.array(list(bv[0]), dtype=np.float32)
-                else:
-                    arr = np.zeros(128, dtype=np.float32)
+                arr = np.array(list(bv[0]), dtype=np.float32) if bv else np.zeros(128, dtype=np.float32)
                 fps.append(arr)
-            finally:
-                # MDAnalysis may hold file handles open on Windows; best-effort cleanup
-                    try:
-                        os.unlink(rec_path)
-                    except OSError:
-                        pass
 
-        # If ProLIF completely failed to find any pharmacophores due to missing hydrogens, 
-        # force fallback to the highly robust structural distance histogram.
-        if np.sum(fps) == 0:
+        finally:
+            shutil.rmtree(_tmpdir, ignore_errors=True)
+
+        if len(fps) == 0 or np.array(fps).sum() == 0:
             return [], False
 
         return fps, True
@@ -354,12 +390,13 @@ def _build_clusters(
 
         mean_fp = member_fps.mean(axis=0)
 
-        # Consensus score: mean_score weighted by ensemble coverage.
-        # Multiplying by fraction (0–1) penalises low-coverage clusters by
-        # pulling the score toward 0.  Sorting lowest-first then favours
-        # clusters that are both energetically favourable (negative) and
-        # consistent across many conformers (fraction close to 1).
-        consensus_score = mean_score * fraction
+        # Consensus score: best pose score weighted by ensemble coverage.
+        # Using the representative (best) pose score rather than mean_score
+        # preserves discrimination between binders and non-binders — mean over
+        # all 9 poses compresses everything toward -5/-6 and loses the signal.
+        # Multiplying by fraction penalises clusters seen in few conformers.
+        best_score = float(rep.score_kcal_mol)
+        consensus_score = best_score * fraction
 
         clusters.append(PoseCluster(
             cluster_id=label,
