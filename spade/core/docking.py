@@ -265,6 +265,7 @@ class UniDockDockingEngine(BaseDockingEngine):
         bbox: BoundingBox,
         n_poses: int,
         conf_idx: int,
+        seed: Optional[int] = None,
     ) -> list[PoseResult]:
         """Dock a single ligand against one conformer."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -277,7 +278,7 @@ class UniDockDockingEngine(BaseDockingEngine):
             with open(ligand_path, "w") as fh:
                 fh.write(ligand.pdbqt_string)
 
-            cmd = self._build_cmd(receptor_path, bbox, n_poses)
+            cmd = self._build_cmd(receptor_path, bbox, n_poses, seed=seed)
             cmd += ["--ligand", ligand_path, "--out", out_path]
 
             _run_subprocess(cmd, cwd=tmpdir, label="unidock")
@@ -290,6 +291,7 @@ class UniDockDockingEngine(BaseDockingEngine):
         bbox: BoundingBox,
         n_poses: int,
         conf_idx: int,
+        seed: Optional[int] = None,
     ) -> list[list[PoseResult]]:
         """
         Dock multiple ligands against one conformer in a single GPU call using
@@ -303,7 +305,7 @@ class UniDockDockingEngine(BaseDockingEngine):
         if not ligands:
             return []
         try:
-            return self._dock_batch_gpu(conformer, ligands, bbox, n_poses, conf_idx)
+            return self._dock_batch_gpu(conformer, ligands, bbox, n_poses, conf_idx, seed=seed)
         except Exception as _e:
             import warnings
             warnings.warn(
@@ -313,7 +315,7 @@ class UniDockDockingEngine(BaseDockingEngine):
             )
             results = []
             for lig in ligands:
-                results.append(self.dock(conformer, lig, bbox, n_poses, conf_idx))
+                results.append(self.dock(conformer, lig, bbox, n_poses, conf_idx, seed=seed))
             return results
 
     def _dock_batch_gpu(
@@ -323,6 +325,7 @@ class UniDockDockingEngine(BaseDockingEngine):
         bbox: BoundingBox,
         n_poses: int,
         conf_idx: int,
+        seed: Optional[int] = None,
     ) -> list[list[PoseResult]]:
         """Internal: true --gpu_batch call — all ligands in one subprocess."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -340,7 +343,7 @@ class UniDockDockingEngine(BaseDockingEngine):
                     fh.write(lig.pdbqt_string)
                 ligand_paths.append(lpath)
 
-            cmd = self._build_cmd(receptor_path, bbox, n_poses)
+            cmd = self._build_cmd(receptor_path, bbox, n_poses, seed=seed)
             # Replace --receptor (already in cmd) with gpu_batch args
             cmd += ["--gpu_batch"] + ligand_paths + ["--dir", out_dir]
 
@@ -358,6 +361,7 @@ class UniDockDockingEngine(BaseDockingEngine):
         receptor_path: str,
         bbox: BoundingBox,
         n_poses: int,
+        seed: Optional[int] = None,
     ) -> list[str]:
         cx, cy, cz = bbox.center
         sx, sy, sz = bbox.size
@@ -378,6 +382,8 @@ class UniDockDockingEngine(BaseDockingEngine):
             cmd += ["--search_mode", self.search_mode]
         else:
             cmd += ["--exhaustiveness", str(self.exhaustiveness)]
+        if seed is not None:
+            cmd += ["--seed", str(seed)]
         return cmd
 
 
@@ -449,6 +455,7 @@ def dock_ensemble(
     device_ids: Optional[list[int]] = None,
     scoring: str = "vina",
     search_mode: Optional[str] = None,
+    base_seed: Optional[int] = None,
 ) -> list[DockingResult]:
     """
     Dock all ligands against every conformer in the ensemble.
@@ -493,8 +500,9 @@ def dock_ensemble(
                 scoring=scoring,
                 search_mode=search_mode,
             )
+            seed = (base_seed + conf_idx) if base_seed is not None else None
             t0 = time.perf_counter()
-            batch_poses = engine.dock_batch(conformer, ligands, bbox, n_poses, conf_idx)
+            batch_poses = engine.dock_batch(conformer, ligands, bbox, n_poses, conf_idx, seed=seed)
             elapsed = time.perf_counter() - t0
             per_ligand_time = elapsed / max(len(ligands), 1)
             return [
@@ -539,8 +547,9 @@ def dock_ensemble(
         bbox = compute_bounding_box(conformer, pocket_residues)
         engine = get_docking_engine(backend="cpu", exhaustiveness=exhaustiveness)
         for ligand in ligands:
+            seed = (base_seed + conf_idx) if base_seed is not None else None
             t0 = time.perf_counter()
-            poses = engine.dock(conformer, ligand, bbox, n_poses, conf_idx)
+            poses = engine.dock(conformer, ligand, bbox, n_poses, conf_idx, seed=seed)
             elapsed = time.perf_counter() - t0
             results.append(DockingResult(
                 conformer_index=conf_idx,
