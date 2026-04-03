@@ -243,11 +243,26 @@ def _try_prolif(
                     prot_path = plain
                 protonated_paths[conf_idx] = prot_path
 
+            # --- Pre-load receptor ProLIF Molecules once per conformer ---
+            # Bypasses MDAnalysis bond-guessing (causes AtomValenceException).
+            # Load PDB directly via RDKit with valence checking disabled.
+            from rdkit import Chem as _Chem
+            prolif_receptors: dict[int, object] = {}
+            for conf_idx, prot_path in protonated_paths.items():
+                _rec_mol = _Chem.MolFromPDBFile(prot_path, sanitize=False, removeHs=False)
+                if _rec_mol is None:
+                    continue
+                _Chem.SanitizeMol(
+                    _rec_mol,
+                    _Chem.SanitizeFlags.SANITIZE_ALL ^ _Chem.SanitizeFlags.SANITIZE_PROPERTIES,
+                )
+                prolif_receptors[conf_idx] = prolif.Molecule(_rec_mol)
+
             # --- Compute fingerprint per pose ---
             fps = []
             for pose in poses:
                 conf_idx = pose.conformer_index
-                if conf_idx not in protonated_paths:
+                if conf_idx not in prolif_receptors:
                     fps.append(np.zeros(128, dtype=np.float32))
                     continue
 
@@ -256,8 +271,7 @@ def _try_prolif(
                     fps.append(np.zeros(128, dtype=np.float32))
                     continue
 
-                u_rec = mda.Universe(protonated_paths[conf_idx])
-                prot = prolif.Molecule.from_mda(u_rec)
+                prot = prolif_receptors[conf_idx]
                 lig = prolif.Molecule.from_rdkit(lig_mol_pose)
                 fp = prolif.Fingerprint()
                 fp.run_from_iterable([lig], prot)
