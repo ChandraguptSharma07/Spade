@@ -54,6 +54,7 @@ class ConsensusResult:
     site_confidence: str      # "high" / "medium" / "low" based on score_std
     n_total_poses: int
     n_clusters: int
+    fingerprint_method: str = "unknown"  # "ProLIF PLIF" or "coordinate pseudo-fingerprint"
 
 
 def cluster_poses(
@@ -92,6 +93,7 @@ def cluster_poses(
 
     # Compute PLIF fingerprints for every pose
     fps = _compute_plif_fingerprints(all_poses, conformers, ligand_mol)
+    fp_method = getattr(_compute_plif_fingerprints, "_last_method", "unknown")
 
     # Cluster by Tanimoto distance (1 - Tanimoto similarity)
     eps = 1.0 - similarity_threshold
@@ -120,6 +122,7 @@ def cluster_poses(
         site_confidence=site_confidence,
         n_total_poses=len(all_poses),
         n_clusters=len(clusters),
+        fingerprint_method=fp_method,
     )
 
 
@@ -155,6 +158,12 @@ def _compute_plif_fingerprints(
     if not prolif_success:
         # Coordinate pseudo-fingerprint: bin atom distances to ligand centroid
         fps = _coordinate_pseudofp(poses)
+
+    fp_method = "ProLIF PLIF" if prolif_success else "coordinate pseudo-fingerprint"
+    import logging as _logging
+    _logging.getLogger(__name__).debug("Fingerprint method: %s", fp_method)
+    # Surface the method in a way visible without debug logging
+    _compute_plif_fingerprints._last_method = fp_method  # type: ignore[attr-defined]
 
     return np.array(fps, dtype=np.float32)
 
