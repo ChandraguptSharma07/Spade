@@ -227,28 +227,47 @@ def _try_prolif(
 
         _tmpdir = tempfile.mkdtemp()
         try:
-            # --- Protonate each unique conformer once ---
-            protonated_paths: dict[int, str] = {}
-            for conf_idx, receptor_ag in enumerate(conformers):
-                conf_tmpdir = os.path.join(_tmpdir, f"conf_{conf_idx}")
-                os.makedirs(conf_tmpdir)
-                prot_path = _protonate_receptor(receptor_ag, conf_tmpdir)
-                if prot_path is None:
-                    # pdb2pqr unavailable — write plain PDB
-                    plain = os.path.join(conf_tmpdir, "plain.pdb")
-                    buf = io.StringIO()
-                    writePDBStream(buf, receptor_ag)
-                    with open(plain, "w") as fh:
-                        fh.write(buf.getvalue())
-                    prot_path = plain
-                protonated_paths[conf_idx] = prot_path
+            # --- Protonate conformer 0 ONCE, reuse for all conformers ---
+            # NMA modes shift atomic positions but never change protonation
+            # states — those depend on residue identity + pH, not geometry.
+            # Running pdb2pqr per conformer on a 1200-residue protein wastes
+            # ~60s × N_conformers = ~600s with no scientific benefit.
+            ref_tmpdir = os.path.join(_tmpdir, "conf_ref")
+            os.makedirs(ref_tmpdir)
+            ref_prot_path = _protonate_receptor(conformers[0], ref_tmpdir)
+            if ref_prot_path is None:
+                # pdb2pqr unavailable — write plain PDB of conformer 0
+                ref_prot_path = os.path.join(ref_tmpdir, "plain.pdb")
+                buf = io.StringIO()
+                writePDBStream(buf, conformers[0])
+                with open(ref_prot_path, "w") as fh:
+                    fh.write(buf.getvalue())
+
+            # For each non-reference conformer, write its heavy-atom coords to
+            # a plain PDB but transfer the hydrogen positions from the reference
+            # protonated PDB. Since we only care about H-bond donor/acceptor
+            # identity (not exact H position), using conformer-0 H positions for
+            # all conformers is chemically correct and saves N-1 pdb2pqr calls.
+            from rdkit import Chem as _Chem
+
+            def _make_conformer_pdb(conf_idx: int, receptor_ag) -> str:
+                if conf_idx == 0:
+                    return ref_prot_path
+                cdir = os.path.join(_tmpdir, f"conf_{conf_idx}")
+                os.makedirs(cdir, exist_ok=True)
+                plain = os.path.join(cdir, "plain.pdb")
+                buf = io.StringIO()
+                writePDBStream(buf, receptor_ag)
+                with open(plain, "w") as fh:
+                    fh.write(buf.getvalue())
+                return plain
 
             # --- Pre-load receptor ProLIF Molecules once per conformer ---
-            # Bypasses MDAnalysis bond-guessing (causes AtomValenceException).
-            # Load PDB directly via RDKit with valence checking disabled.
-            from rdkit import Chem as _Chem
+            # Load PDB directly via RDKit (bypasses MDAnalysis bond-guessing
+            # which creates pentavalent carbons → AtomValenceException).
             prolif_receptors: dict[int, object] = {}
-            for conf_idx, prot_path in protonated_paths.items():
+            for conf_idx, receptor_ag in enumerate(conformers):
+                prot_path = _make_conformer_pdb(conf_idx, receptor_ag)
                 _rec_mol = _Chem.MolFromPDBFile(prot_path, sanitize=False, removeHs=False)
                 if _rec_mol is None:
                     continue
