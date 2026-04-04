@@ -620,6 +620,12 @@ def _parse_vina_pdbqt_output(
     followed by ATOM/HETATM lines for that pose.
     """
     if not os.path.exists(out_path):
+        warnings.warn(
+            f"UniDock produced no output file at {out_path} (conformer {conf_idx}). "
+            "This usually means CUDA failed to initialize — check that the UniDock binary "
+            "matches your CUDA version, or set backend='cpu' to use Vina instead.",
+            stacklevel=3,
+        )
         return []
 
     with open(out_path) as fh:
