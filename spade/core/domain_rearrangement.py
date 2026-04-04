@@ -275,7 +275,8 @@ class PAEDomainRearrangementGenerator:
                 angle = 0.0
 
             # Apply sidechain chi1 targets on all non-reference conformers.
-            # Must run BEFORE repacker so clash resolution sees the intended rotamer.
+            # Applied BEFORE repacker so clash resolution in other residues
+            # accounts for the new rotamer geometry.
             if frac > 0.0 and self.sidechain_targets:
                 for resnum, target_chi1 in self.sidechain_targets.items():
                     try:
@@ -287,7 +288,10 @@ class PAEDomainRearrangementGenerator:
                             stacklevel=2,
                         )
 
-            # Repack clashes introduced by rotation and chi1 assignment
+            # Repack clashes introduced by rotation and chi1 assignment.
+            # The Dunbrack repacker may revert sidechain_target residues back
+            # to their clash-free original rotamer — re-apply targets afterward
+            # to guarantee the intended rotamer is locked in.
             clashing = DunbrackRepacker._detect_clashes(conf, threshold=_CLASH_THRESHOLD)
             if clashing:
                 conf = self.repacker.repack(conf, clashing)
@@ -298,6 +302,19 @@ class PAEDomainRearrangementGenerator:
                         f"angle={angle:.1f}° after repacking.",
                         stacklevel=2,
                     )
+
+            # Re-apply chi1 targets after repacking to ensure the repacker
+            # did not revert them. This is the authoritative final assignment.
+            if frac > 0.0 and self.sidechain_targets:
+                for resnum, target_chi1 in self.sidechain_targets.items():
+                    try:
+                        conf = self._set_chi1(conf, resnum, target_chi1)
+                    except Exception as exc:
+                        warnings.warn(
+                            f"chi1 re-assignment failed for residue {resnum} at "
+                            f"angle={angle:.1f}°: {exc}",
+                            stacklevel=2,
+                        )
 
             n = conf.numAtoms()
             conf.setData("conformer_index",    np.full(n, i, dtype=int))
@@ -335,23 +352,24 @@ class PAEDomainRearrangementGenerator:
         from spade.core.repacker import _dihedral, _rotate_about_axis
 
         result = ag.copy()
-        res_sel = result.select(f"resnum {resnum} and not hydrogen")
-        if res_sel is None:
+
+        # Always query the parent AtomGroup directly.
+        # Never call .select() on a nested Selection — ProDy's Selection.select()
+        # may return an AtomMap lacking getIndices() depending on version.
+        def _get_coord(name: str) -> np.ndarray:
+            sel = result.select(f"resnum {resnum} and name {name}")
+            if sel is None or len(sel) == 0:
+                raise ValueError(f"Atom {name} not found in residue {resnum}.")
+            return result.getCoords()[sel.getIndices()[0]].copy()
+
+        if result.select(f"resnum {resnum}") is None:
             raise ValueError(f"Residue {resnum} not found in structure.")
 
-        # Atom name lookup helper
-        def _get_coord(sel, name: str) -> np.ndarray:
-            atom = sel.select(f"name {name}")
-            if atom is None or len(atom) == 0:
-                raise ValueError(f"Atom {name} not found in residue {resnum}.")
-            return result.getCoords()[atom.getIndices()[0]].copy()
-
         # Chi1 bond: N–CA–CB–XG where XG is the first gamma atom
-        # Try the standard gamma atom names in priority order
         gamma_candidates = ["CG", "CG1", "OG", "OG1", "SG", "ND1", "SD"]
         gamma_name = None
         for name in gamma_candidates:
-            if res_sel.select(f"name {name}") is not None:
+            if result.select(f"resnum {resnum} and name {name}") is not None:
                 gamma_name = name
                 break
         if gamma_name is None:
@@ -360,10 +378,10 @@ class PAEDomainRearrangementGenerator:
                 "cannot define chi1 (GLY/ALA have no chi1)."
             )
 
-        p0 = _get_coord(res_sel, "N")
-        p1 = _get_coord(res_sel, "CA")
-        p2 = _get_coord(res_sel, "CB")
-        p3 = _get_coord(res_sel, gamma_name)
+        p0 = _get_coord("N")
+        p1 = _get_coord("CA")
+        p2 = _get_coord("CB")
+        p3 = _get_coord(gamma_name)
 
         current_chi1 = _dihedral(p0, p1, p2, p3)
         delta = target_chi1_deg - current_chi1
@@ -371,17 +389,16 @@ class PAEDomainRearrangementGenerator:
         if abs(delta) < 0.5:   # already close enough
             return result
 
-        # Rotate all atoms beyond the CA–CB bond (CB and all side-chain atoms)
-        # around the CA→CB axis
+        # Rotate all side-chain atoms (CB and beyond) around the CA→CB axis
         backbone_names = {"N", "CA", "C", "O", "OXT"}
-        all_indices  = result.getIndices()
-        all_resnums  = result.getResnums()
-        all_names    = result.getNames()
-        all_coords   = result.getCoords().copy()
+        all_resnums = result.getResnums()
+        all_names   = result.getNames()
+        all_coords  = result.getCoords().copy()
 
         rotate_indices = [
-            idx for idx, rn, nm in zip(all_indices, all_resnums, all_names)
-            if int(rn) == resnum and nm not in backbone_names and nm != "H"
+            i for i, (rn, nm) in enumerate(zip(all_resnums, all_names))
+            if int(rn) == resnum
+            and nm not in backbone_names
             and not nm.startswith("H")
         ]
 
